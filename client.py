@@ -54,6 +54,16 @@ client_tcp.sendall(reg.encode())
 print(Fore.CYAN + f"{timestamp()} Registered UDP/P2P ports.")
 
 last_file = {"path": None}
+online_users = []
+joined_groups = []
+list_lock = threading.Lock()
+
+def _extract_body(msg):
+    return msg.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in msg else ""
+
+def _parse_lines(body):
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    return [line for line in lines if line.lower() != "(no groups)"]
 
 # --------------- P2P RECEIVE ----------------
 def p2p_receive():
@@ -69,11 +79,27 @@ def p2p_receive():
 
 # -------------- TCP RECEIVE ----------------
 def tcp_receive():
+    global online_users, joined_groups
     while True:
         try:
             msg = receive_message(client_tcp)
             if not msg:
                 continue
+
+            if "CTRL USERS_LIST" in msg:
+                body = _extract_body(msg)
+                users = [u for u in _parse_lines(body) if u != alias]
+                with list_lock:
+                    online_users = users
+                continue
+
+            if "CTRL GROUPS_LIST" in msg:
+                body = _extract_body(msg)
+                groups = _parse_lines(body)
+                with list_lock:
+                    joined_groups = groups
+                continue
+
             print(Fore.WHITE + f"\n{timestamp()} {msg}\n")
 
             if "FILE_AUTH" in msg:
@@ -111,12 +137,13 @@ def tcp_send():
         client_tcp.sendall(build_response("CMD LIST_GROUPS CCP/1.0", f"From: {alias}\r\nSeq: {seq}\r\nLength: 0\r\n\r\n").encode())
         time.sleep(0.4)
 
-        # Temporary local list (read from last outputs):
+        with list_lock:
+            current_online = list(online_users)
+            current_groups = list(joined_groups)
+
         print(Fore.CYAN + "\n=========== Available Recipients ===========")
         print(Fore.CYAN + "(Type a name or a number; ‘ALL’ to broadcast)")
-        online = ['A','B']  # This placeholder text is updated automatically
-        joined_groups = ['group1']  # you’ll see correct list printed from server messages
-        options = online + joined_groups + ['ALL']
+        options = current_online + current_groups + ['ALL']
         for i, name in enumerate(options, 1):
             print(Fore.YELLOW + f"{i}. {name}")
         print(Fore.CYAN + "============================================")
@@ -136,7 +163,8 @@ def tcp_send():
             continue
 
         body = msg
-        channel = "GROUP" if dest.upper() != "ALL" and not dest.startswith("@") else "PRIVATE"
+        with list_lock:
+            channel = "GROUP" if dest in joined_groups else "PRIVATE"
         packet = build_response("DATA MESSAGE CCP/1.0", f"Channel: {channel}\r\nFrom: {alias}\r\nTo: {dest}\r\nSeq: {seq}\r\nLength: {len(body)}\r\n\r\n{body}")
         client_tcp.sendall(packet.encode())
         print(Fore.GREEN + f"{timestamp()} Sent to {dest}\n")
